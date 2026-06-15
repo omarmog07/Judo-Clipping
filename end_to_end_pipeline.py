@@ -8,6 +8,7 @@ import time
 import re
 import json
 import runpy
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -24,8 +25,15 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Point directly to the bundled executable
-FFMPEG_CMD = os.path.join(APP_DIR, "ffmpeg.exe")
+def resolve_ffmpeg_cmd():
+    bundled_ffmpeg = os.path.join(APP_DIR, "ffmpeg.exe")
+    if os.path.exists(bundled_ffmpeg):
+        return bundled_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+FFMPEG_CMD = resolve_ffmpeg_cmd()
+FFPROBE_CMD = shutil.which("ffprobe")
 
 # ==========================================
 # 1. CONFIGURATION & PATHS
@@ -40,6 +48,7 @@ FINAL_CLIPS_DIR = os.path.join(BASE_DIR, "06_Final_Clips")
 
 PROJECT_JSON = os.path.join(RESULTS_DIR, "project_manifest.json")
 MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
+SEGMENT_SECONDS = int(os.getenv("JUDO_SEGMENT_SECONDS", "600"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
@@ -97,16 +106,28 @@ class Task1_FormatVideo(luigi.Task):
 
     def run(self):
         print(f"\n>>> TASK 1: Formatting {self.video_path}...")
-        cmd = [
-            FFMPEG_CMD, "-y", "-i", str(self.video_path), 
-            "-vsync", "1",               # FORCE Constant Frame Rate
-            "-r", "30",                  # Set framerate to exactly 30
-            "-c:v", "libx264", 
-            "-preset", "fast", "-crf", "22", 
-            "-af", "aresample=async=1",  # Keep audio perfectly synced with new video timing
+        fast_cmd = [
+            FFMPEG_CMD, "-y", "-i", str(self.video_path),
+            "-map", "0",
+            "-c", "copy",
+            "-movflags", "+faststart",
             self.output().path
         ]
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(fast_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+
+        print("Fast remux failed; falling back to normalized re-encode.")
+        encode_cmd = [
+            FFMPEG_CMD, "-y", "-i", str(self.video_path),
+            "-vsync", "1",
+            "-r", "30",
+            "-c:v", "libx264",
+            "-preset", "veryfast", "-crf", "24",
+            "-af", "aresample=async=1",
+            self.output().path
+        ]
+        subprocess.run(encode_cmd, check=True)
 
 
 class Task2_SegmentVideos(luigi.Task):
@@ -129,7 +150,12 @@ class Task2_SegmentVideos(luigi.Task):
         original_argv = sys.argv 
         
         # Inject the arguments this specific script expects
-        sys.argv = ["truncate_videos.py", "--input-root-path", CONVERTED_DIR, "--output-root-path", SEGMENTED_DIR]
+        sys.argv = [
+            "truncate_videos.py",
+            "--input-root-path", CONVERTED_DIR,
+            "--output-root-path", SEGMENTED_DIR,
+            "--duration", str(SEGMENT_SECONDS),
+        ]
         
         if os.path.abspath(".") not in sys.path:
             sys.path.insert(0, os.path.abspath("."))
@@ -146,7 +172,11 @@ class Task2_SegmentVideos(luigi.Task):
 
 
 class Task3_ExtractFrames(luigi.Task):
-    """Bypasses module errors and forces FFmpeg to extract frames from segments."""
+    """Legacy compatibility task.
+
+    The AI analysis reads segmented videos directly, so extracting every frame
+    to JPEG is pure overhead for the current pipeline.
+    """
     def requires(self): return Task2_SegmentVideos()
     
     def output(self): 
@@ -154,14 +184,7 @@ class Task3_ExtractFrames(luigi.Task):
         return luigi.LocalTarget(os.path.join(FRAMES_DIR, f"_FRAMES_{num_vids}_FILES"))
 
     def run(self):
-        print("\n>>> TASK 3: Extracting Frames...")
-        segments = list(Path(SEGMENTED_DIR).rglob("*.mp4"))
-        for video in segments:
-            target_folder = os.path.join(FRAMES_DIR, f"{video.parent.name}_{video.stem}")
-            os.makedirs(target_folder, exist_ok=True)
-            if len(os.listdir(target_folder)) < 100: # Skip if already processed
-                cmd = [FFMPEG_CMD, "-y", "-i", str(video), "-vf", "fps=30", "-q:v", "5", os.path.join(target_folder, "%06d.jpg")]
-                subprocess.run(cmd, check=True)
+        print("\n>>> TASK 3: Skipping frame extraction (AI reads videos directly).")
         with self.output().open('w') as f: f.write("Done")
 
 
@@ -246,7 +269,7 @@ class Task6_ConsolidateAndClip(luigi.Task):
             # --- NEW LOGIC: Convert local chunk time into GLOBAL Master Time ---
             try:
                 chunk_idx = int(chunk_name)
-                offset = chunk_idx * 600 # 600 seconds = 10 minutes
+                offset = chunk_idx * SEGMENT_SECONDS
             except ValueError:
                 offset = 0
                 
@@ -311,12 +334,13 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 try:
                     raw_files = list(Path(RAW_DIR).glob(f"*{parent_video}*.*"))
                     if raw_files:
-                        cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format_tags=creation_time", "-of", "default=noprint_wrappers=1:nokey=1", str(raw_files[0])]
-                        result = subprocess.run(cmd, capture_output=True, text=True)
-                        creation_str = result.stdout.strip()
-                        if creation_str:
-                            clean_time = creation_str.split('.')[0].replace('T', ' ').replace('Z', '')
-                            base_dt = datetime.strptime(clean_time, "%Y-%m-%d %H:%M:%S")
+                        if FFPROBE_CMD:
+                            cmd = [FFPROBE_CMD, "-v", "quiet", "-show_entries", "format_tags=creation_time", "-of", "default=noprint_wrappers=1:nokey=1", str(raw_files[0])]
+                            result = subprocess.run(cmd, capture_output=True, text=True)
+                            creation_str = result.stdout.strip()
+                            if creation_str:
+                                clean_time = creation_str.split('.')[0].replace('T', ' ').replace('Z', '')
+                                base_dt = datetime.strptime(clean_time, "%Y-%m-%d %H:%M:%S")
                 except Exception as e:
                     pass
 
@@ -347,8 +371,30 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
                 
                 # Point FFmpeg at the Master Video, not the chunk!
-                cmd = [FFMPEG_CMD, "-y", "-ss", str(start_time), "-to", str(end_time), "-i", master_video_path, out_path]
-                subprocess.run(cmd, check=True)
+                fast_cmd = [
+                    FFMPEG_CMD, "-y",
+                    "-ss", str(start_time),
+                    "-to", str(end_time),
+                    "-i", master_video_path,
+                    "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
+                    out_path
+                ]
+                result = subprocess.run(fast_cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    print("Fast clip copy failed; falling back to re-encode.")
+                    encode_cmd = [
+                        FFMPEG_CMD, "-y",
+                        "-ss", str(start_time),
+                        "-to", str(end_time),
+                        "-i", master_video_path,
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-crf", "24",
+                        "-c:a", "aac",
+                        out_path
+                    ]
+                    subprocess.run(encode_cmd, check=True)
                 
                 # --- NEW LOGIC: Increment the counter for the next loop ---
                 match_count += 1

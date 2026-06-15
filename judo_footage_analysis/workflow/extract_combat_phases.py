@@ -13,6 +13,9 @@ ssl._create_default_https_context = ssl._create_unverified_context
 class ExtractCombatPhases(luigi.Task):
     project_json = luigi.Parameter()
     output_dir = luigi.Parameter()
+    sample_interval_seconds = luigi.FloatParameter(default=float(os.getenv("JUDO_SAMPLE_INTERVAL_SECONDS", "1.0")))
+    batch_size = luigi.IntParameter(default=int(os.getenv("JUDO_YOLO_BATCH_SIZE", "16")))
+    confidence = luigi.FloatParameter(default=float(os.getenv("JUDO_YOLO_CONF", "0.15")))
 
     def output(self):
         # Create a success flag file for Luigi
@@ -47,35 +50,62 @@ class ExtractCombatPhases(luigi.Task):
             cap = cv2.VideoCapture(v_path)
             results_data = []
             frame_count = 0
+            pending_frames = []
+            pending_timestamps = []
 
             if not cap.isOpened():
                 print(f"Error: Could not open video {v_path}")
                 continue
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret: break
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if not fps or fps <= 0:
+                fps = 30
 
-                # Sample every 30 frames (approx 1 frame per second)
-                if frame_count % 30 == 0:
-                   # ML Inference
-                    results = model(frame, conf=0.15, verbose=False)[0]
+            sample_stride = max(1, round(fps * float(self.sample_interval_seconds)))
 
-                    # NEW LOGIC: Check if Match_Start (Class ID 1) is detected
+            def flush_batch():
+                nonlocal pending_frames, pending_timestamps
+                if not pending_frames:
+                    return
+
+                batch_results = model(
+                    pending_frames,
+                    conf=float(self.confidence),
+                    verbose=False,
+                    batch=int(self.batch_size),
+                )
+
+                for timestamp, results in zip(pending_timestamps, batch_results):
                     classes_in_frame = results.boxes.cls.cpu().tolist()
                     bow_detected = (1.0 in classes_in_frame) or (1 in classes_in_frame)
-
-                    # Classify if the frame is Standing (Tachi-waza) or Groundwork (Ne-waza)
                     phase = self.classify_phase(results.boxes)
 
                     results_data.append({
-                        "timestamp": frame_count / 30,
+                        "timestamp": timestamp,
                         "phase": phase,
                         "detections": len(results.boxes),
-                        "bow_detected": bow_detected  # Added to the CSV log
+                        "bow_detected": bow_detected
                     })
 
+                pending_frames = []
+                pending_timestamps = []
+
+            while cap.isOpened():
+                ret = cap.grab()
+                if not ret: break
+
+                if frame_count % sample_stride == 0:
+                    retrieved, frame = cap.retrieve()
+                    if not retrieved:
+                        break
+                    pending_frames.append(frame)
+                    pending_timestamps.append(frame_count / fps)
+                    if len(pending_frames) >= int(self.batch_size):
+                        flush_batch()
+
                 frame_count += 1
+
+            flush_batch()
 
             # Save the results for this video
             df = pd.DataFrame(results_data)

@@ -83,14 +83,22 @@ class TruncateVideos(luigi.Task):
             try:
                 (
                     ffmpeg.input(self.input_path, ss=start_time, t=self.duration)
-                    .output(str(output_file), vcodec='libx264', acodec='aac', format='mp4')
+                    .output(str(output_file), vcodec='copy', acodec='copy', format='mp4')
                     .run(overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd=FFMPEG_PATH)
                 )
             except ffmpeg.Error as e:
-                print(f"FFmpeg failed for segment {i}:")
-                if e.stderr:
-                    print(e.stderr.decode())
-                raise
+                print(f"Fast segment copy failed for segment {i}; falling back to re-encode.")
+                try:
+                    (
+                        ffmpeg.input(self.input_path, ss=start_time, t=self.duration)
+                        .output(str(output_file), vcodec='libx264', acodec='aac', preset='veryfast', crf=24, format='mp4')
+                        .run(overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd=FFMPEG_PATH)
+                    )
+                except ffmpeg.Error as fallback_error:
+                    print(f"FFmpeg failed for segment {i}:")
+                    if fallback_error.stderr:
+                        print(fallback_error.stderr.decode())
+                    raise
 
         with self.output().open("w") as f:
             f.write("")
