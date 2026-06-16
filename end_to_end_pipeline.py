@@ -58,7 +58,7 @@ def get_raw_videos():
     """Helper function to count inputs and trigger dynamic updates."""
     return list(Path(RAW_DIR).glob("*.*"))
 
-# --- NEW: Global dictionary to store our task times ---
+# --- NEW: Global dictionary to store task times ---
 TASK_TIMINGS = {}
 
 # ==========================================
