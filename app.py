@@ -92,7 +92,7 @@ class JudoApp(QMainWindow):
             "2. The system will automatically build the working directory and process the AI inferences. A terminal window may open, do not close it.<br>"
             "3. Final segmented matches will be saved in the <b>Judo_Pipeline\\06_Final_Clips</b> folder.<br>"
 	    "<br>"
-	    "This program may take <b>10+ hours</b> to run and appear unresponsive. For stability, avoid running other programs while processing.<br>"
+	    "This program may take some time to run. For stability, avoid running other programs while processing.<br>"
         )
         self.instructions.setWordWrap(True)
         self.instructions.setStyleSheet("font-size: 14px; padding-bottom: 10px;")
