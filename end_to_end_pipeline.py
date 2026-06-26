@@ -58,7 +58,7 @@ MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
 SEGMENT_SECONDS = int(os.getenv("JUDO_SEGMENT_SECONDS", "600"))
 FAST_VIDEO_COPY = env_flag("JUDO_FAST_VIDEO_COPY", False)
 FAST_FINAL_CLIP_COPY = env_flag("JUDO_FAST_FINAL_CLIP_COPY", False)
-ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "90"))
+ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "10"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
