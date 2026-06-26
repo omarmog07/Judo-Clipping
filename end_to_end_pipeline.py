@@ -59,6 +59,9 @@ SEGMENT_SECONDS = int(os.getenv("JUDO_SEGMENT_SECONDS", "600"))
 FAST_VIDEO_COPY = env_flag("JUDO_FAST_VIDEO_COPY", False)
 FAST_FINAL_CLIP_COPY = env_flag("JUDO_FAST_FINAL_CLIP_COPY", False)
 ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "5"))
+ACTION_CONFIRM_SECONDS = float(os.getenv("JUDO_ACTION_CONFIRM_SECONDS", "2"))
+ACTION_CONFIRM_RATIO = float(os.getenv("JUDO_ACTION_CONFIRM_RATIO", "0.6"))
+MIN_CLIP_SECONDS = float(os.getenv("JUDO_MIN_CLIP_SECONDS", "8"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
@@ -306,13 +309,26 @@ class Task6_ConsolidateAndClip(luigi.Task):
             inactive_phases = ['mate', 'no-match/intermission', 'none', 'nan']
             
             is_active_phase = ~clean_phases.isin(inactive_phases)
-            has_fighters = data['detections'] >= 2
-            is_action = is_active_phase & has_fighters
-            
-            # THE PATIENCE BUFFER: Bridge gaps across chunk boundaries!
             timestamp_step = data['global_timestamp'].diff().median()
             if pd.isna(timestamp_step) or timestamp_step <= 0:
                 timestamp_step = 1.0
+
+            fighter_count = data.get('fighter_count', data['detections']).fillna(0)
+            has_fighters = fighter_count >= 2
+            raw_action = is_active_phase & has_fighters
+
+            # Require a short run of nearby active frames so one noisy detection
+            # does not create an empty match clip.
+            confirm_rows = max(1, round(ACTION_CONFIRM_SECONDS / timestamp_step))
+            is_action = (
+                raw_action.astype(float)
+                .rolling(window=confirm_rows, min_periods=confirm_rows, center=True)
+                .mean()
+                .fillna(0)
+                >= ACTION_CONFIRM_RATIO
+            )
+
+            # THE PATIENCE BUFFER: Bridge short gaps across chunk boundaries.
             action_gap_rows = max(1, round(ACTION_GAP_SECONDS / timestamp_step))
             is_action = is_action.replace(False, pd.NA).ffill(limit=action_gap_rows).fillna(False).astype(bool)
             
@@ -369,6 +385,10 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 # Calculate cut times using the GLOBAL timeline
                 start_time = max(0, block_data['global_timestamp'].min() - 2)
                 end_time = block_data['global_timestamp'].max() + 2
+                duration = max(0.1, end_time - start_time)
+
+                if duration < MIN_CLIP_SECONDS:
+                    continue
                 
                 if base_dt:
                     # Simply add the global seconds to the master start time
@@ -385,7 +405,6 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 out_path = os.path.join(FINAL_CLIPS_DIR, clip_filename)
                 print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
                 
-                duration = max(0.1, end_time - start_time)
                 if FAST_FINAL_CLIP_COPY:
                     fast_cmd = [
                         FFMPEG_CMD, "-y",

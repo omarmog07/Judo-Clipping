@@ -15,7 +15,9 @@ class ExtractCombatPhases(luigi.Task):
     output_dir = luigi.Parameter()
     sample_interval_seconds = luigi.FloatParameter(default=float(os.getenv("JUDO_SAMPLE_INTERVAL_SECONDS", "0.25")))
     batch_size = luigi.IntParameter(default=int(os.getenv("JUDO_YOLO_BATCH_SIZE", "16")))
-    confidence = luigi.FloatParameter(default=float(os.getenv("JUDO_YOLO_CONF", "0.15")))
+    confidence = luigi.FloatParameter(default=float(os.getenv("JUDO_YOLO_CONF", "0.35")))
+    fighter_class_id = luigi.IntParameter(default=int(os.getenv("JUDO_FIGHTER_CLASS_ID", "0")))
+    match_start_class_id = luigi.IntParameter(default=int(os.getenv("JUDO_MATCH_START_CLASS_ID", "1")))
 
     def output(self):
         # Create a success flag file for Luigi
@@ -76,14 +78,25 @@ class ExtractCombatPhases(luigi.Task):
                 )
 
                 for timestamp, results in zip(pending_timestamps, batch_results):
-                    classes_in_frame = results.boxes.cls.cpu().tolist()
-                    bow_detected = (1.0 in classes_in_frame) or (1 in classes_in_frame)
+                    classes_in_frame = [int(cls) for cls in results.boxes.cls.cpu().tolist()]
+                    confidences = results.boxes.conf.cpu().tolist() if len(results.boxes) else []
+                    fighter_confidences = [
+                        conf
+                        for cls, conf in zip(classes_in_frame, confidences)
+                        if cls == int(self.fighter_class_id)
+                    ]
+                    fighter_count = len(fighter_confidences)
+                    match_start_count = classes_in_frame.count(int(self.match_start_class_id))
+                    bow_detected = match_start_count > 0
                     phase = self.classify_phase(results.boxes)
 
                     results_data.append({
                         "timestamp": timestamp,
                         "phase": phase,
                         "detections": len(results.boxes),
+                        "fighter_count": fighter_count,
+                        "match_start_count": match_start_count,
+                        "avg_fighter_conf": sum(fighter_confidences) / fighter_count if fighter_count else 0.0,
                         "bow_detected": bow_detected
                     })
 
@@ -119,12 +132,17 @@ class ExtractCombatPhases(luigi.Task):
 
     def classify_phase(self, boxes):
         """Heuristic logic to distinguish standing from groundwork"""
-        if len(boxes) < 2:
+        fighter_boxes = [
+            b for b in boxes
+            if int(b.cls.item()) == int(self.fighter_class_id)
+        ]
+
+        if len(fighter_boxes) < 2:
             return "No-Match/Intermission"
 
         try:
             # xywh[0][3] is the height of the bounding box
-            heights = [b.xywh[0][3].item() for b in boxes]
+            heights = [b.xywh[0][3].item() for b in fighter_boxes]
             avg_height = sum(heights) / len(heights)
 
             # Threshold of 150 pixels (adjustable based on camera distance)
