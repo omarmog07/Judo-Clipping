@@ -24,8 +24,14 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Point directly to the bundled executable
-FFMPEG_CMD = os.path.join(APP_DIR, "ffmpeg.exe")
+def resolve_ffmpeg_cmd():
+    bundled_ffmpeg = os.path.join(APP_DIR, "ffmpeg.exe")
+    if os.path.exists(bundled_ffmpeg):
+        return bundled_ffmpeg
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
+FFMPEG_CMD = resolve_ffmpeg_cmd()
 
 # ==========================================
 # 1. CONFIGURATION & PATHS
