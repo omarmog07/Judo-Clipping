@@ -62,6 +62,13 @@ ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "5"))
 ACTION_CONFIRM_SECONDS = float(os.getenv("JUDO_ACTION_CONFIRM_SECONDS", "2"))
 ACTION_CONFIRM_RATIO = float(os.getenv("JUDO_ACTION_CONFIRM_RATIO", "0.6"))
 MIN_CLIP_SECONDS = float(os.getenv("JUDO_MIN_CLIP_SECONDS", "8"))
+REQUIRE_BOW_BOUNDARIES = env_flag("JUDO_REQUIRE_BOW_BOUNDARIES", True)
+ALLOW_ACTION_FALLBACK = env_flag("JUDO_ALLOW_ACTION_FALLBACK", False)
+BOW_DEBOUNCE_SECONDS = float(os.getenv("JUDO_BOW_DEBOUNCE_SECONDS", "15"))
+BOW_PADDING_SECONDS = float(os.getenv("JUDO_BOW_PADDING_SECONDS", "1"))
+MIN_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MIN_BOW_MATCH_SECONDS", "20"))
+MAX_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MAX_BOW_MATCH_SECONDS", "900"))
+MIN_ACTION_SECONDS_PER_BOW_CLIP = float(os.getenv("JUDO_MIN_ACTION_SECONDS_PER_BOW_CLIP", "5"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
@@ -332,23 +339,71 @@ class Task6_ConsolidateAndClip(luigi.Task):
             action_gap_rows = max(1, round(ACTION_GAP_SECONDS / timestamp_step))
             is_action = is_action.replace(False, pd.NA).ffill(limit=action_gap_rows).fillna(False).astype(bool)
             
-            # Reverse-Cooldown Debouncer + Crowd Density Filter
+            # Bow debouncer + crowd density filter. Keep the first bow in a
+            # short cluster so clips begin as close as possible to the bow.
             raw_bows = data.get('bow_detected', pd.Series(False, index=data.index)).fillna(False).astype(bool)
             is_not_crowded = data['detections'] <= 8
             bows = raw_bows & is_not_crowded
             
-            bow_timestamps = data.loc[bows, 'global_timestamp']
-            time_to_next_bow = bow_timestamps.diff(-1).abs()
-            valid_bows_mask = (time_to_next_bow > 15) | (time_to_next_bow.isna())
-            
             data['valid_bow'] = False
-            data.loc[bow_timestamps[valid_bows_mask].index, 'valid_bow'] = True
+            valid_bow_indices = []
+            last_bow_time = None
+            bow_timestamps = data.loc[bows, 'global_timestamp'].sort_values()
+            for idx, bow_time in bow_timestamps.items():
+                if last_bow_time is None or bow_time - last_bow_time > BOW_DEBOUNCE_SECONDS:
+                    valid_bow_indices.append(idx)
+                    last_bow_time = bow_time
+
+            data.loc[valid_bow_indices, 'valid_bow'] = True
             data['match_id'] = data['valid_bow'].cumsum()
-            
-            block_changes = (is_action != is_action.shift()) | (data['match_id'] != data['match_id'].shift())
-            block_ids = block_changes.cumsum()
-            
-            active_blocks = data[is_action].groupby(block_ids)
+
+            clip_windows = []
+            valid_bow_times = data.loc[valid_bow_indices, 'global_timestamp'].sort_values().tolist()
+
+            if REQUIRE_BOW_BOUNDARIES:
+                if len(valid_bow_times) < 2:
+                    print(f"⚠️ {parent_video}: found {len(valid_bow_times)} valid bow(s), so no bow-to-bow clips were made.")
+
+                for start_bow, end_bow in zip(valid_bow_times, valid_bow_times[1:]):
+                    start_time = max(0, start_bow - BOW_PADDING_SECONDS)
+                    end_time = end_bow + BOW_PADDING_SECONDS
+                    duration = end_time - start_time
+
+                    in_bow_window = (
+                        (data['global_timestamp'] >= start_bow) &
+                        (data['global_timestamp'] <= end_bow)
+                    )
+                    action_seconds = float((is_action & in_bow_window).sum() * timestamp_step)
+
+                    if duration < MIN_BOW_MATCH_SECONDS:
+                        continue
+                    if duration > MAX_BOW_MATCH_SECONDS:
+                        print(f"⚠️ Skipping long bow interval ({duration:.1f}s). Possible missed ending bow.")
+                        continue
+                    if action_seconds < MIN_ACTION_SECONDS_PER_BOW_CLIP:
+                        continue
+
+                    clip_windows.append((start_time, end_time, action_seconds))
+
+                if not clip_windows and ALLOW_ACTION_FALLBACK:
+                    print(f"⚠️ {parent_video}: no bow-to-bow clips passed filters; falling back to action-only clips.")
+
+            if (not REQUIRE_BOW_BOUNDARIES) or (not clip_windows and ALLOW_ACTION_FALLBACK):
+                block_changes = (is_action != is_action.shift()) | (data['match_id'] != data['match_id'].shift())
+                block_ids = block_changes.cumsum()
+
+                for block_id, block_data in data[is_action].groupby(block_ids):
+                    if len(block_data) < 5:
+                        continue
+
+                    start_time = max(0, block_data['global_timestamp'].min() - 2)
+                    end_time = block_data['global_timestamp'].max() + 2
+                    duration = end_time - start_time
+
+                    if duration < MIN_CLIP_SECONDS:
+                        continue
+
+                    clip_windows.append((start_time, end_time, None))
             
             # Set target to the 10-hour standard master video in the Converted folder
             master_video_path = os.path.join(CONVERTED_DIR, f"{parent_video}_std.mp4")
@@ -378,17 +433,8 @@ class Task6_ConsolidateAndClip(luigi.Task):
             # --- NEW LOGIC: Initialize match counter ---
             match_count = 1
 
-            for block_id, block_data in active_blocks:
-                if len(block_data) < 5: 
-                    continue
-                    
-                # Calculate cut times using the GLOBAL timeline
-                start_time = max(0, block_data['global_timestamp'].min() - 2)
-                end_time = block_data['global_timestamp'].max() + 2
+            for start_time, end_time, action_seconds in clip_windows:
                 duration = max(0.1, end_time - start_time)
-
-                if duration < MIN_CLIP_SECONDS:
-                    continue
                 
                 if base_dt:
                     # Simply add the global seconds to the master start time
@@ -403,7 +449,10 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 clip_filename = f"{parent_video}_Match_{match_count:02d}_AT_{time_str}.mp4"
                 
                 out_path = os.path.join(FINAL_CLIPS_DIR, clip_filename)
-                print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
+                if action_seconds is None:
+                    print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
+                else:
+                    print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s, {action_seconds:.1f}s action (Saved as {clip_filename})")
                 
                 if FAST_FINAL_CLIP_COPY:
                     fast_cmd = [
