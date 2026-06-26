@@ -39,7 +39,7 @@ class PipelineWorker(QThread):
     def run(self):
         # 1. Generate the folder structure
         raw_dir = os.path.join(self.base_dir, "01_Raw_Input")
-        folders = [raw_dir, "02_Converted", "03_Segmented", "04_Frames", "05_Results", "06_Final_Clips"]
+        folders = [raw_dir, "02_Converted", "03_Segmented", "05_Results", "06_Final_Clips"]
         for f in folders:
             os.makedirs(os.path.join(self.base_dir, f), exist_ok=True)
 
@@ -60,7 +60,7 @@ class PipelineWorker(QThread):
         print("\nLaunching Judo AI Pipeline natively...")
         
         # 4. Run Luigi directly inside the current process memory (Sequential Processing)
-        luigi.build([end_to_end_pipeline.Task6_ConsolidateAndClip()], workers=1, local_scheduler=True)
+        luigi.build([end_to_end_pipeline.Task5_ConsolidateAndClip()], workers=1, local_scheduler=True)
         
         print("PIPELINE COMPLETE!")
         

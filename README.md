@@ -53,25 +53,24 @@ The application is structured into three primary layers:
 
 ### 2. Pipeline Task Flow (Luigi Orchestrator)
 
-The core pipeline (`end_to_end_pipeline.py`) consists of six sequential Luigi tasks. A downstream task will not initiate until its upstream dependencies emit a success state.
+The core pipeline (`end_to_end_pipeline.py`) consists of five sequential Luigi tasks. A downstream task will not initiate until its upstream dependencies emit a success state.
 
 * **Task 1: Format Video:** Standardizes the raw input video (e.g., `.flv` to `.mp4`) to ensure consistent framerates and encoding for the AI model.
 * **Task 2: Segment Videos (`truncate_videos.py`):** Utilizes `imageio_ffmpeg` and `ffmpeg.exe` to slice long tournament files into 10-minute (600-second) chunks to prevent memory overflow during inference.
-* **Task 3: Extract Frames:** Pulls specific frames from the segments for isolated processing.
-* **Task 4: Generate Manifest (`generate_combat_json.py`):** Creates a structured JSON manifest tracking file paths and metadata for the ML model.
-* **Task 5: Run AI Analysis (`extract_combat_phases.py`):** Ingests the manifest and runs YOLOv8 inference to detect combat phases, outputting timestamps. 
-* **Task 6: Consolidate and Clip:** Reads the AI timestamp outputs and triggers FFmpeg to cut the final highlight clips losslessly.
+* **Task 3: Generate Manifest (`generate_combat_json.py`):** Creates a structured JSON manifest tracking file paths and metadata for the ML model.
+* **Task 4: Run AI Analysis (`extract_combat_phases.py`):** Ingests the manifest and runs YOLOv8 inference directly on the segmented videos to detect combat phases, outputting timestamps.
+* **Task 5: Consolidate and Clip:** Reads the AI timestamp outputs and triggers FFmpeg to cut the final highlight clips losslessly.
 
 ### 3. Script Interaction & Dynamic Execution
 
 To keep the ML repository (`judo_footage_analysis`) decoupled from the UI orchestrator, `end_to_end_pipeline.py` executes the execution layer scripts dynamically using `runpy.run_path()`. 
 
-**Execution Flow Example (Task 5):**
-1. Luigi initiates Task 5.
+**Execution Flow Example (Task 4):**
+1. Luigi initiates Task 4.
 2. The orchestrator overrides `sys.argv` with the required CLI arguments (e.g., `--project-json`, `--output-dir`).
 3. `sys.path.insert(0, os.path.abspath("."))` forces the Python environment to recognize the external folders.
 4. `runpy.run_path("judo_footage_analysis/workflow/extract_combat_phases.py")` executes the script in the current memory space.
-5. Upon successful exit code (0), Luigi writes a `Done` flag to the local cache and proceeds to Task 6.
+5. Upon successful exit code (0), Luigi writes a `Done` flag to the local cache and proceeds to the final clipping task.
 
 ### 4. Developer Guide
 

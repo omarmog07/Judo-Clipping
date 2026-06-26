@@ -40,7 +40,6 @@ BASE_DIR = os.path.abspath("Judo_Pipeline")
 RAW_DIR = os.path.join(BASE_DIR, "01_Raw_Input")
 CONVERTED_DIR = os.path.join(BASE_DIR, "02_Converted")
 SEGMENTED_DIR = os.path.join(BASE_DIR, "03_Segmented")
-FRAMES_DIR = os.path.join(BASE_DIR, "04_Frames")
 RESULTS_DIR = os.path.join(BASE_DIR, "05_Results")
 FINAL_CLIPS_DIR = os.path.join(BASE_DIR, "06_Final_Clips")
 
@@ -48,7 +47,7 @@ PROJECT_JSON = os.path.join(RESULTS_DIR, "project_manifest.json")
 MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
 
 # Ensure base directories exist
-for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
+for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 def get_raw_videos():
@@ -151,24 +150,7 @@ class Task2_SegmentVideos(luigi.Task):
         with self.output().open('w') as f: f.write("Done")
 
 
-class Task3_ExtractFrames(luigi.Task):
-    """Legacy compatibility task.
-
-    The AI analysis reads segmented videos directly, so extracting every frame
-    to JPEG is pure storage overhead for this pipeline.
-    """
-    def requires(self): return Task2_SegmentVideos()
-    
-    def output(self): 
-        num_vids = len(get_raw_videos())
-        return luigi.LocalTarget(os.path.join(FRAMES_DIR, f"_FRAMES_{num_vids}_FILES"))
-
-    def run(self):
-        print("\n>>> TASK 3: Skipping frame extraction (AI reads segmented videos directly).")
-        with self.output().open('w') as f: f.write("Done")
-
-
-class Task4_GenerateManifest(luigi.Task):
+class Task3_GenerateManifest(luigi.Task):
     """Creates the JSON map required by the YOLO AI."""
     def requires(self): return Task2_SegmentVideos()
     
@@ -177,7 +159,7 @@ class Task4_GenerateManifest(luigi.Task):
         return luigi.LocalTarget(os.path.join(RESULTS_DIR, f"_MANIFEST_{num_vids}_FILES"))
 
     def run(self):
-        print("\n>>> TASK 4: Generating AI Manifest...")
+        print("\n>>> TASK 3: Generating AI Manifest...")
         
         original_argv = sys.argv
         sys.argv = ["generate_combat_json.py", "--input_folder", SEGMENTED_DIR, "--output_path", PROJECT_JSON]
@@ -193,16 +175,16 @@ class Task4_GenerateManifest(luigi.Task):
         with self.output().open('w') as f: f.write("Done")
 
 
-class Task5_RunAIAnalysis(luigi.Task):
+class Task4_RunAIAnalysis(luigi.Task):
     """Executes the YOLOv8 model to classify combat phases."""
-    def requires(self): return Task4_GenerateManifest()
+    def requires(self): return Task3_GenerateManifest()
     
     def output(self): 
         num_vids = len(get_raw_videos())
         return luigi.LocalTarget(os.path.join(RESULTS_DIR, f"_AI_{num_vids}_FILES"))
 
     def run(self):
-        print("\n>>> TASK 5: Running AI Analysis...")
+        print("\n>>> TASK 4: Running AI Analysis...")
         
         original_argv = sys.argv
         sys.argv = ["extract_combat_phases.py", "ExtractCombatPhases", "--project-json", PROJECT_JSON, "--output-dir", RESULTS_DIR, "--local-scheduler"]
@@ -220,16 +202,16 @@ class Task5_RunAIAnalysis(luigi.Task):
         with self.output().open('w') as f: f.write("Done")
 
 
-class Task6_ConsolidateAndClip(luigi.Task):
+class Task5_ConsolidateAndClip(luigi.Task):
     """Merges the AI data and uses FFmpeg to trim the final action clips directly from the LONG FORM video."""
-    def requires(self): return Task5_RunAIAnalysis()
+    def requires(self): return Task4_RunAIAnalysis()
     
     def output(self): 
         num_vids = len(get_raw_videos())
         return luigi.LocalTarget(os.path.join(FINAL_CLIPS_DIR, f"_PIPELINE_COMPLETE_{num_vids}_FILES"))
 
     def run(self):
-        print("\n>>> TASK 6: Consolidating Data & Clipping Matches from Master Video...")
+        print("\n>>> TASK 5: Consolidating Data & Clipping Matches from Master Video...")
         
         all_files = glob.glob(os.path.join(RESULTS_DIR, "*.csv"))
         all_files = [f for f in all_files if "tournament_master_log" not in f]
@@ -366,7 +348,7 @@ if __name__ == "__main__":
     start_time = time.time()
     
     # Pointing Luigi to the final task causes it to chain everything else automatically
-    luigi.build([Task6_ConsolidateAndClip()], workers=1, local_scheduler=False)
+    luigi.build([Task5_ConsolidateAndClip()], workers=1, local_scheduler=False)
     
     end_time = time.time()
     total_minutes = (end_time - start_time) / 60
