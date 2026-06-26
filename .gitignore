@@ -37,6 +37,7 @@ Judo_Pipeline/
 # Python Cache
 __pycache__/
 *.pyc
+.DS_Store
 
 # Local Executables
 ffmpeg.exe

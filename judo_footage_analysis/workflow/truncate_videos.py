@@ -21,6 +21,15 @@ FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 print(f"Using FFmpeg: {FFMPEG_PATH}")
 # -------------------------------------------
 
+def env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+FAST_SEGMENT_COPY = env_flag("JUDO_FAST_SEGMENT_COPY", False)
+
 def get_duration_ffmpeg(video_path, ffmpeg_path):
     """
     Retrieves video duration using ffmpeg instead of ffprobe.
@@ -80,25 +89,28 @@ class TruncateVideos(luigi.Task):
                 break
 
             output_file = out_dir / f"{i:04d}.mp4"
-            try:
-                (
-                    ffmpeg.input(self.input_path, ss=start_time, t=self.duration)
-                    .output(str(output_file), vcodec='copy', acodec='copy', format='mp4')
-                    .run(overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd=FFMPEG_PATH)
-                )
-            except ffmpeg.Error as e:
-                print(f"Fast segment copy failed for segment {i}; falling back to re-encode.")
+            if FAST_SEGMENT_COPY:
                 try:
                     (
                         ffmpeg.input(self.input_path, ss=start_time, t=self.duration)
-                        .output(str(output_file), vcodec='libx264', acodec='aac', preset='veryfast', crf=24, format='mp4')
+                        .output(str(output_file), vcodec='copy', acodec='copy', format='mp4')
                         .run(overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd=FFMPEG_PATH)
                     )
-                except ffmpeg.Error as fallback_error:
-                    print(f"FFmpeg failed for segment {i}:")
-                    if fallback_error.stderr:
-                        print(fallback_error.stderr.decode())
-                    raise
+                    continue
+                except ffmpeg.Error:
+                    print(f"Fast segment copy failed for segment {i}; falling back to re-encode.")
+
+            try:
+                (
+                    ffmpeg.input(self.input_path, ss=start_time, t=self.duration)
+                    .output(str(output_file), vcodec='libx264', acodec='aac', preset='veryfast', crf=22, format='mp4')
+                    .run(overwrite_output=True, capture_stdout=True, capture_stderr=True, cmd=FFMPEG_PATH)
+                )
+            except ffmpeg.Error as fallback_error:
+                print(f"FFmpeg failed for segment {i}:")
+                if fallback_error.stderr:
+                    print(fallback_error.stderr.decode())
+                raise
 
         with self.output().open("w") as f:
             f.write("")

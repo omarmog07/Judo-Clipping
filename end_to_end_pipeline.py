@@ -35,6 +35,13 @@ def resolve_ffmpeg_cmd():
 FFMPEG_CMD = resolve_ffmpeg_cmd()
 FFPROBE_CMD = shutil.which("ffprobe")
 
+
+def env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 # ==========================================
 # 1. CONFIGURATION & PATHS
 # ==========================================
@@ -49,6 +56,9 @@ FINAL_CLIPS_DIR = os.path.join(BASE_DIR, "06_Final_Clips")
 PROJECT_JSON = os.path.join(RESULTS_DIR, "project_manifest.json")
 MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
 SEGMENT_SECONDS = int(os.getenv("JUDO_SEGMENT_SECONDS", "600"))
+FAST_VIDEO_COPY = env_flag("JUDO_FAST_VIDEO_COPY", False)
+FAST_FINAL_CLIP_COPY = env_flag("JUDO_FAST_FINAL_CLIP_COPY", False)
+ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "90"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
@@ -106,24 +116,25 @@ class Task1_FormatVideo(luigi.Task):
 
     def run(self):
         print(f"\n>>> TASK 1: Formatting {self.video_path}...")
-        fast_cmd = [
-            FFMPEG_CMD, "-y", "-i", str(self.video_path),
-            "-map", "0",
-            "-c", "copy",
-            "-movflags", "+faststart",
-            self.output().path
-        ]
-        result = subprocess.run(fast_cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            return
+        if FAST_VIDEO_COPY:
+            fast_cmd = [
+                FFMPEG_CMD, "-y", "-i", str(self.video_path),
+                "-map", "0",
+                "-c", "copy",
+                "-movflags", "+faststart",
+                self.output().path
+            ]
+            result = subprocess.run(fast_cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                return
+            print("Fast remux failed; falling back to normalized re-encode.")
 
-        print("Fast remux failed; falling back to normalized re-encode.")
         encode_cmd = [
             FFMPEG_CMD, "-y", "-i", str(self.video_path),
             "-vsync", "1",
             "-r", "30",
             "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "24",
+            "-preset", "veryfast", "-crf", "22",
             "-af", "aresample=async=1",
             self.output().path
         ]
@@ -299,7 +310,11 @@ class Task6_ConsolidateAndClip(luigi.Task):
             is_action = is_active_phase & has_fighters
             
             # THE PATIENCE BUFFER: Bridge gaps across chunk boundaries!
-            is_action = is_action.replace(False, pd.NA).ffill(limit=90).fillna(False).astype(bool)
+            timestamp_step = data['global_timestamp'].diff().median()
+            if pd.isna(timestamp_step) or timestamp_step <= 0:
+                timestamp_step = 1.0
+            action_gap_rows = max(1, round(ACTION_GAP_SECONDS / timestamp_step))
+            is_action = is_action.replace(False, pd.NA).ffill(limit=action_gap_rows).fillna(False).astype(bool)
             
             # Reverse-Cooldown Debouncer + Crowd Density Filter
             raw_bows = data.get('bow_detected', pd.Series(False, index=data.index)).fillna(False).astype(bool)
@@ -370,31 +385,37 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 out_path = os.path.join(FINAL_CLIPS_DIR, clip_filename)
                 print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
                 
-                # Point FFmpeg at the Master Video, not the chunk!
-                fast_cmd = [
-                    FFMPEG_CMD, "-y",
-                    "-ss", str(start_time),
-                    "-to", str(end_time),
-                    "-i", master_video_path,
-                    "-c", "copy",
-                    "-avoid_negative_ts", "make_zero",
-                    out_path
-                ]
-                result = subprocess.run(fast_cmd, capture_output=True, text=True)
-                if result.returncode != 0:
-                    print("Fast clip copy failed; falling back to re-encode.")
-                    encode_cmd = [
+                duration = max(0.1, end_time - start_time)
+                if FAST_FINAL_CLIP_COPY:
+                    fast_cmd = [
                         FFMPEG_CMD, "-y",
                         "-ss", str(start_time),
-                        "-to", str(end_time),
                         "-i", master_video_path,
-                        "-c:v", "libx264",
-                        "-preset", "veryfast",
-                        "-crf", "24",
-                        "-c:a", "aac",
+                        "-t", str(duration),
+                        "-c", "copy",
+                        "-avoid_negative_ts", "make_zero",
                         out_path
                     ]
-                    subprocess.run(encode_cmd, check=True)
+                    result = subprocess.run(fast_cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        match_count += 1
+                        continue
+                    print("Fast clip copy failed; falling back to accurate re-encode.")
+
+                # Put -ss after -i for accurate cuts. This is slower, but keeps clip
+                # boundaries closer to the AI timestamps.
+                encode_cmd = [
+                    FFMPEG_CMD, "-y",
+                    "-i", master_video_path,
+                    "-ss", str(start_time),
+                    "-t", str(duration),
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "22",
+                    "-c:a", "aac",
+                    out_path
+                ]
+                subprocess.run(encode_cmd, check=True)
                 
                 # --- NEW LOGIC: Increment the counter for the next loop ---
                 match_count += 1
