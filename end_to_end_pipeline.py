@@ -8,7 +8,6 @@ import time
 import re
 import json
 import runpy
-import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -25,22 +24,8 @@ if getattr(sys, 'frozen', False):
 else:
     APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def resolve_ffmpeg_cmd():
-    bundled_ffmpeg = os.path.join(APP_DIR, "ffmpeg.exe")
-    if os.path.exists(bundled_ffmpeg):
-        return bundled_ffmpeg
-    return imageio_ffmpeg.get_ffmpeg_exe()
-
-
-FFMPEG_CMD = resolve_ffmpeg_cmd()
-FFPROBE_CMD = shutil.which("ffprobe")
-
-
-def env_flag(name, default=False):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+# Point directly to the bundled executable
+FFMPEG_CMD = os.path.join(APP_DIR, "ffmpeg.exe")
 
 # ==========================================
 # 1. CONFIGURATION & PATHS
@@ -55,20 +40,6 @@ FINAL_CLIPS_DIR = os.path.join(BASE_DIR, "06_Final_Clips")
 
 PROJECT_JSON = os.path.join(RESULTS_DIR, "project_manifest.json")
 MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
-SEGMENT_SECONDS = int(os.getenv("JUDO_SEGMENT_SECONDS", "600"))
-FAST_VIDEO_COPY = env_flag("JUDO_FAST_VIDEO_COPY", False)
-FAST_FINAL_CLIP_COPY = env_flag("JUDO_FAST_FINAL_CLIP_COPY", False)
-ACTION_GAP_SECONDS = float(os.getenv("JUDO_ACTION_GAP_SECONDS", "5"))
-ACTION_CONFIRM_SECONDS = float(os.getenv("JUDO_ACTION_CONFIRM_SECONDS", "2"))
-ACTION_CONFIRM_RATIO = float(os.getenv("JUDO_ACTION_CONFIRM_RATIO", "0.6"))
-MIN_CLIP_SECONDS = float(os.getenv("JUDO_MIN_CLIP_SECONDS", "8"))
-REQUIRE_BOW_BOUNDARIES = env_flag("JUDO_REQUIRE_BOW_BOUNDARIES", True)
-ALLOW_ACTION_FALLBACK = env_flag("JUDO_ALLOW_ACTION_FALLBACK", False)
-BOW_DEBOUNCE_SECONDS = float(os.getenv("JUDO_BOW_DEBOUNCE_SECONDS", "15"))
-BOW_PADDING_SECONDS = float(os.getenv("JUDO_BOW_PADDING_SECONDS", "1"))
-MIN_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MIN_BOW_MATCH_SECONDS", "20"))
-MAX_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MAX_BOW_MATCH_SECONDS", "900"))
-MIN_ACTION_SECONDS_PER_BOW_CLIP = float(os.getenv("JUDO_MIN_ACTION_SECONDS_PER_BOW_CLIP", "5"))
 
 # Ensure base directories exist
 for d in [RAW_DIR, CONVERTED_DIR, SEGMENTED_DIR, FRAMES_DIR, RESULTS_DIR, FINAL_CLIPS_DIR]:
@@ -78,7 +49,7 @@ def get_raw_videos():
     """Helper function to count inputs and trigger dynamic updates."""
     return list(Path(RAW_DIR).glob("*.*"))
 
-# --- NEW: Global dictionary to store task times ---
+# --- NEW: Global dictionary to store our task times ---
 TASK_TIMINGS = {}
 
 # ==========================================
@@ -126,29 +97,16 @@ class Task1_FormatVideo(luigi.Task):
 
     def run(self):
         print(f"\n>>> TASK 1: Formatting {self.video_path}...")
-        if FAST_VIDEO_COPY:
-            fast_cmd = [
-                FFMPEG_CMD, "-y", "-i", str(self.video_path),
-                "-map", "0",
-                "-c", "copy",
-                "-movflags", "+faststart",
-                self.output().path
-            ]
-            result = subprocess.run(fast_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                return
-            print("Fast remux failed; falling back to normalized re-encode.")
-
-        encode_cmd = [
-            FFMPEG_CMD, "-y", "-i", str(self.video_path),
-            "-vsync", "1",
-            "-r", "30",
-            "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "22",
-            "-af", "aresample=async=1",
+        cmd = [
+            FFMPEG_CMD, "-y", "-i", str(self.video_path), 
+            "-vsync", "1",               # FORCE Constant Frame Rate
+            "-r", "30",                  # Set framerate to exactly 30
+            "-c:v", "libx264", 
+            "-preset", "fast", "-crf", "22", 
+            "-af", "aresample=async=1",  # Keep audio perfectly synced with new video timing
             self.output().path
         ]
-        subprocess.run(encode_cmd, check=True)
+        subprocess.run(cmd, check=True)
 
 
 class Task2_SegmentVideos(luigi.Task):
@@ -171,12 +129,7 @@ class Task2_SegmentVideos(luigi.Task):
         original_argv = sys.argv 
         
         # Inject the arguments this specific script expects
-        sys.argv = [
-            "truncate_videos.py",
-            "--input-root-path", CONVERTED_DIR,
-            "--output-root-path", SEGMENTED_DIR,
-            "--duration", str(SEGMENT_SECONDS),
-        ]
+        sys.argv = ["truncate_videos.py", "--input-root-path", CONVERTED_DIR, "--output-root-path", SEGMENTED_DIR]
         
         if os.path.abspath(".") not in sys.path:
             sys.path.insert(0, os.path.abspath("."))
@@ -196,7 +149,7 @@ class Task3_ExtractFrames(luigi.Task):
     """Legacy compatibility task.
 
     The AI analysis reads segmented videos directly, so extracting every frame
-    to JPEG is pure overhead for the current pipeline.
+    to JPEG is pure storage overhead for this pipeline.
     """
     def requires(self): return Task2_SegmentVideos()
     
@@ -205,13 +158,13 @@ class Task3_ExtractFrames(luigi.Task):
         return luigi.LocalTarget(os.path.join(FRAMES_DIR, f"_FRAMES_{num_vids}_FILES"))
 
     def run(self):
-        print("\n>>> TASK 3: Skipping frame extraction (AI reads videos directly).")
+        print("\n>>> TASK 3: Skipping frame extraction (AI reads segmented videos directly).")
         with self.output().open('w') as f: f.write("Done")
 
 
 class Task4_GenerateManifest(luigi.Task):
     """Creates the JSON map required by the YOLO AI."""
-    def requires(self): return Task3_ExtractFrames()
+    def requires(self): return Task2_SegmentVideos()
     
     def output(self): 
         num_vids = len(get_raw_videos())
@@ -290,7 +243,7 @@ class Task6_ConsolidateAndClip(luigi.Task):
             # --- NEW LOGIC: Convert local chunk time into GLOBAL Master Time ---
             try:
                 chunk_idx = int(chunk_name)
-                offset = chunk_idx * SEGMENT_SECONDS
+                offset = chunk_idx * 600 # 600 seconds = 10 minutes
             except ValueError:
                 offset = 0
                 
@@ -316,94 +269,29 @@ class Task6_ConsolidateAndClip(luigi.Task):
             inactive_phases = ['mate', 'no-match/intermission', 'none', 'nan']
             
             is_active_phase = ~clean_phases.isin(inactive_phases)
-            timestamp_step = data['global_timestamp'].diff().median()
-            if pd.isna(timestamp_step) or timestamp_step <= 0:
-                timestamp_step = 1.0
-
-            fighter_count = data.get('fighter_count', data['detections']).fillna(0)
-            has_fighters = fighter_count >= 2
-            raw_action = is_active_phase & has_fighters
-
-            # Require a short run of nearby active frames so one noisy detection
-            # does not create an empty match clip.
-            confirm_rows = max(1, round(ACTION_CONFIRM_SECONDS / timestamp_step))
-            is_action = (
-                raw_action.astype(float)
-                .rolling(window=confirm_rows, min_periods=confirm_rows, center=True)
-                .mean()
-                .fillna(0)
-                >= ACTION_CONFIRM_RATIO
-            )
-
-            # THE PATIENCE BUFFER: Bridge short gaps across chunk boundaries.
-            action_gap_rows = max(1, round(ACTION_GAP_SECONDS / timestamp_step))
-            is_action = is_action.replace(False, pd.NA).ffill(limit=action_gap_rows).fillna(False).astype(bool)
+            has_fighters = data['detections'] >= 2
+            is_action = is_active_phase & has_fighters
             
-            # Bow debouncer + crowd density filter. Keep the first bow in a
-            # short cluster so clips begin as close as possible to the bow.
+            # THE PATIENCE BUFFER: Bridge gaps across chunk boundaries!
+            is_action = is_action.replace(False, pd.NA).ffill(limit=90).fillna(False).astype(bool)
+            
+            # Reverse-Cooldown Debouncer + Crowd Density Filter
             raw_bows = data.get('bow_detected', pd.Series(False, index=data.index)).fillna(False).astype(bool)
             is_not_crowded = data['detections'] <= 8
             bows = raw_bows & is_not_crowded
             
+            bow_timestamps = data.loc[bows, 'global_timestamp']
+            time_to_next_bow = bow_timestamps.diff(-1).abs()
+            valid_bows_mask = (time_to_next_bow > 15) | (time_to_next_bow.isna())
+            
             data['valid_bow'] = False
-            valid_bow_indices = []
-            last_bow_time = None
-            bow_timestamps = data.loc[bows, 'global_timestamp'].sort_values()
-            for idx, bow_time in bow_timestamps.items():
-                if last_bow_time is None or bow_time - last_bow_time > BOW_DEBOUNCE_SECONDS:
-                    valid_bow_indices.append(idx)
-                    last_bow_time = bow_time
-
-            data.loc[valid_bow_indices, 'valid_bow'] = True
+            data.loc[bow_timestamps[valid_bows_mask].index, 'valid_bow'] = True
             data['match_id'] = data['valid_bow'].cumsum()
-
-            clip_windows = []
-            valid_bow_times = data.loc[valid_bow_indices, 'global_timestamp'].sort_values().tolist()
-
-            if REQUIRE_BOW_BOUNDARIES:
-                if len(valid_bow_times) < 2:
-                    print(f"⚠️ {parent_video}: found {len(valid_bow_times)} valid bow(s), so no bow-to-bow clips were made.")
-
-                for start_bow, end_bow in zip(valid_bow_times, valid_bow_times[1:]):
-                    start_time = max(0, start_bow - BOW_PADDING_SECONDS)
-                    end_time = end_bow + BOW_PADDING_SECONDS
-                    duration = end_time - start_time
-
-                    in_bow_window = (
-                        (data['global_timestamp'] >= start_bow) &
-                        (data['global_timestamp'] <= end_bow)
-                    )
-                    action_seconds = float((is_action & in_bow_window).sum() * timestamp_step)
-
-                    if duration < MIN_BOW_MATCH_SECONDS:
-                        continue
-                    if duration > MAX_BOW_MATCH_SECONDS:
-                        print(f"⚠️ Skipping long bow interval ({duration:.1f}s). Possible missed ending bow.")
-                        continue
-                    if action_seconds < MIN_ACTION_SECONDS_PER_BOW_CLIP:
-                        continue
-
-                    clip_windows.append((start_time, end_time, action_seconds))
-
-                if not clip_windows and ALLOW_ACTION_FALLBACK:
-                    print(f"⚠️ {parent_video}: no bow-to-bow clips passed filters; falling back to action-only clips.")
-
-            if (not REQUIRE_BOW_BOUNDARIES) or (not clip_windows and ALLOW_ACTION_FALLBACK):
-                block_changes = (is_action != is_action.shift()) | (data['match_id'] != data['match_id'].shift())
-                block_ids = block_changes.cumsum()
-
-                for block_id, block_data in data[is_action].groupby(block_ids):
-                    if len(block_data) < 5:
-                        continue
-
-                    start_time = max(0, block_data['global_timestamp'].min() - 2)
-                    end_time = block_data['global_timestamp'].max() + 2
-                    duration = end_time - start_time
-
-                    if duration < MIN_CLIP_SECONDS:
-                        continue
-
-                    clip_windows.append((start_time, end_time, None))
+            
+            block_changes = (is_action != is_action.shift()) | (data['match_id'] != data['match_id'].shift())
+            block_ids = block_changes.cumsum()
+            
+            active_blocks = data[is_action].groupby(block_ids)
             
             # Set target to the 10-hour standard master video in the Converted folder
             master_video_path = os.path.join(CONVERTED_DIR, f"{parent_video}_std.mp4")
@@ -420,21 +308,25 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 try:
                     raw_files = list(Path(RAW_DIR).glob(f"*{parent_video}*.*"))
                     if raw_files:
-                        if FFPROBE_CMD:
-                            cmd = [FFPROBE_CMD, "-v", "quiet", "-show_entries", "format_tags=creation_time", "-of", "default=noprint_wrappers=1:nokey=1", str(raw_files[0])]
-                            result = subprocess.run(cmd, capture_output=True, text=True)
-                            creation_str = result.stdout.strip()
-                            if creation_str:
-                                clean_time = creation_str.split('.')[0].replace('T', ' ').replace('Z', '')
-                                base_dt = datetime.strptime(clean_time, "%Y-%m-%d %H:%M:%S")
+                        cmd = ["ffprobe", "-v", "quiet", "-show_entries", "format_tags=creation_time", "-of", "default=noprint_wrappers=1:nokey=1", str(raw_files[0])]
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        creation_str = result.stdout.strip()
+                        if creation_str:
+                            clean_time = creation_str.split('.')[0].replace('T', ' ').replace('Z', '')
+                            base_dt = datetime.strptime(clean_time, "%Y-%m-%d %H:%M:%S")
                 except Exception as e:
                     pass
 
             # --- NEW LOGIC: Initialize match counter ---
             match_count = 1
 
-            for start_time, end_time, action_seconds in clip_windows:
-                duration = max(0.1, end_time - start_time)
+            for block_id, block_data in active_blocks:
+                if len(block_data) < 5: 
+                    continue
+                    
+                # Calculate cut times using the GLOBAL timeline
+                start_time = max(0, block_data['global_timestamp'].min() - 2)
+                end_time = block_data['global_timestamp'].max() + 2
                 
                 if base_dt:
                     # Simply add the global seconds to the master start time
@@ -449,41 +341,11 @@ class Task6_ConsolidateAndClip(luigi.Task):
                 clip_filename = f"{parent_video}_Match_{match_count:02d}_AT_{time_str}.mp4"
                 
                 out_path = os.path.join(FINAL_CLIPS_DIR, clip_filename)
-                if action_seconds is None:
-                    print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
-                else:
-                    print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s, {action_seconds:.1f}s action (Saved as {clip_filename})")
+                print(f"✂ Clipping Match {match_count:02d} -> {start_time:.1f}s to {end_time:.1f}s (Saved as {clip_filename})")
                 
-                if FAST_FINAL_CLIP_COPY:
-                    fast_cmd = [
-                        FFMPEG_CMD, "-y",
-                        "-ss", str(start_time),
-                        "-i", master_video_path,
-                        "-t", str(duration),
-                        "-c", "copy",
-                        "-avoid_negative_ts", "make_zero",
-                        out_path
-                    ]
-                    result = subprocess.run(fast_cmd, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        match_count += 1
-                        continue
-                    print("Fast clip copy failed; falling back to accurate re-encode.")
-
-                # Put -ss after -i for accurate cuts. This is slower, but keeps clip
-                # boundaries closer to the AI timestamps.
-                encode_cmd = [
-                    FFMPEG_CMD, "-y",
-                    "-i", master_video_path,
-                    "-ss", str(start_time),
-                    "-t", str(duration),
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "22",
-                    "-c:a", "aac",
-                    out_path
-                ]
-                subprocess.run(encode_cmd, check=True)
+                # Point FFmpeg at the Master Video, not the chunk!
+                cmd = [FFMPEG_CMD, "-y", "-ss", str(start_time), "-to", str(end_time), "-i", master_video_path, out_path]
+                subprocess.run(cmd, check=True)
                 
                 # --- NEW LOGIC: Increment the counter for the next loop ---
                 match_count += 1
