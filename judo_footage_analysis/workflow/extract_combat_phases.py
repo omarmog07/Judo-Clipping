@@ -13,7 +13,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 class ExtractCombatPhases(luigi.Task):
     project_json = luigi.Parameter()
     output_dir = luigi.Parameter()
-    sample_interval_seconds = luigi.FloatParameter(default=float(os.getenv("JUDO_SAMPLE_INTERVAL_SECONDS", "0.5")))
+    sample_interval_seconds = luigi.FloatParameter(default=float(os.getenv("JUDO_SAMPLE_INTERVAL_SECONDS", "0.25")))
     batch_size = luigi.IntParameter(default=int(os.getenv("JUDO_YOLO_BATCH_SIZE", "16")))
     confidence = luigi.FloatParameter(default=float(os.getenv("JUDO_YOLO_CONF", "0.15")))
 
