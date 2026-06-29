@@ -45,7 +45,7 @@ FINAL_CLIPS_DIR = os.path.join(BASE_DIR, "06_Final_Clips")
 
 PROJECT_JSON = os.path.join(RESULTS_DIR, "project_manifest.json")
 MASTER_CSV = os.path.join(RESULTS_DIR, "tournament_master_log.csv")
-BOW_PADDING_SECONDS = float(os.getenv("JUDO_BOW_PADDING_SECONDS", "1"))
+BOW_PADDING_SECONDS = float(os.getenv("JUDO_BOW_PADDING_SECONDS", "3"))
 MIN_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MIN_BOW_MATCH_SECONDS", "20"))
 MAX_BOW_MATCH_SECONDS = float(os.getenv("JUDO_MAX_BOW_MATCH_SECONDS", "900"))
 MIN_ACTION_SECONDS_PER_BOW_CLIP = float(os.getenv("JUDO_MIN_ACTION_SECONDS_PER_BOW_CLIP", "5"))
