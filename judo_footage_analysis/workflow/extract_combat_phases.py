@@ -56,8 +56,8 @@ class ExtractCombatPhases(luigi.Task):
                 ret, frame = cap.read()
                 if not ret: break
 
-                # Sample every 30 frames (approx 1 frame per second)
-                if frame_count % 30 == 0:
+                # Sample every 10 frames (approx 3 frames per second)
+                if frame_count % 10 == 0:
                    # ML Inference
                     results = model(frame, conf=0.15, verbose=False)[0]
 
